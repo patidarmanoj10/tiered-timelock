@@ -1,0 +1,16 @@
+# Foundry
+out/
+forge-cache/
+broadcast/
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/
+
+# Env
+.env
+.env.local
+
+# Node (in case anyone adds JS tooling later)
+node_modules/
