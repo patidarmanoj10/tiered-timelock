@@ -40,16 +40,22 @@ contract TargetMock {
     /// @dev Used by the reentrancy test. Calls back into the timelock during execution.
     function reenter(address timelock_, bytes calldata reentrantCall_) external onlyOwner {
         emit Reentered();
-        (bool ok, bytes memory ret) = timelock_.call(reentrantCall_);
+        (bool _ok, bytes memory _ret) = timelock_.call(reentrantCall_);
         // surface whatever the timelock returned
-        if (!ok) {
+        if (!_ok) {
             assembly {
-                revert(add(ret, 32), mload(ret))
+                revert(add(_ret, 32), mload(_ret))
             }
         }
     }
 
     function payableSink() external payable onlyOwner {
+        value = msg.value;
+    }
+
+    /// @dev Mimics WETH.deposit() / vaETH.depositETH() — requires msg.value > 0.
+    function depositETH() external payable onlyOwner {
+        require(msg.value > 0, "no value");
         value = msg.value;
     }
 }
