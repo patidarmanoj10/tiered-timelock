@@ -42,6 +42,30 @@ contract TieredTimelockTest is Test {
         assertEq(tl.gracePeriod(), INITIAL_GRACE);
     }
 
+    function test_gettersReturnCurrentAddresses() public {
+        address[] memory p = tl.getProposers();
+        assertEq(p.length, 1);
+        assertEq(p[0], proposer);
+
+        address[] memory c = tl.getCancellers();
+        assertEq(c.length, 1);
+        assertEq(c[0], canceller);
+
+        // Add a second proposer via self-call, verify the getter reflects it.
+        address newProp = makeAddr("newProp");
+        vm.prank(proposer);
+        tl.execute(
+            address(tl),
+            abi.encodeCall(TieredTimelock.addProposer, (newProp)),
+            bytes32(0),
+            bytes32(0)
+        );
+
+        address[] memory p2 = tl.getProposers();
+        assertEq(p2.length, 2);
+        assertEq(tl.proposerCount(), 2);
+    }
+
     function test_constructorRevertsZeroAdmin() public {
         address[] memory p = new address[](1);
         p[0] = proposer;
@@ -231,7 +255,7 @@ contract TieredTimelockTest is Test {
         tl.schedule(address(target), data, bytes32(0), bytes32(0));
 
         vm.warp(block.timestamp + 1 days + INITIAL_GRACE + 1);
-        vm.expectRevert(TieredTimelock.OperationExpired.selector);
+        vm.expectRevert(TieredTimelock.ProposalExpired.selector);
         tl.execute(address(target), data, bytes32(0), bytes32(0));
     }
 

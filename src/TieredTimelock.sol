@@ -2,6 +2,7 @@
 pragma solidity 0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
 /**
  * @title TieredTimelock
@@ -9,32 +10,35 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *         single owner/governor of every contract in a protocol stack.
  *
  * Operating model:
- *   - PROPOSER schedules a call: schedule(target, data, predecessor, salt) → eta = now + delayOf[target,selector]
- *   - After eta and within grace period: anyone can execute(target, data, predecessor, salt)
- *   - CANCELLER can cancel a pending action before it executes
- *   - For functions with delayOf == 0, PROPOSER can call execute() directly without prior schedule
+ *   - PROPOSER schedules a call: schedule(target, data, predecessor, salt)
+ *     → executableAt = now + delayOf[target, selector]
+ *   - After executableAt and within grace period: anyone can execute the proposal
+ *   - CANCELLER can cancel a pending proposal before it executes
+ *   - For selectors with delayOf == 0, PROPOSER can call execute() directly without schedule
  *
  * Self-governance:
- *   - increaseDelay(target, selector, newDelay): delayed by its own selector's delay (initially 0)
+ *   - increaseDelay(target, selector, newDelay): delayed by its own selector's delay (0 by default)
  *   - decreaseDelay(target, selector, newDelay): delayed by the TARGET selector's CURRENT delay,
  *     so a delay can NEVER be reduced faster than it currently holds
- *   - addProposer / removeProposer / addCanceller / removeCanceller / updateGracePeriod: each
- *     delayed by its own selector's delay (governance can raise these over time)
+ *   - addProposer / removeProposer / addCanceller / removeCanceller / updateGracePeriod:
+ *     each delayed by its own selector's delay
  *
  * Initialization:
- *   - The deployer is the initial admin with the right to call seedDelay() and seedRole(),
- *     setting starting state without going through the schedule flow.
- *   - After seeding, the admin MUST call renounceAdmin() to make the contract fully self-governing.
- *     Anything that needs to change after that point goes through the schedule/execute flow.
+ *   - Deployer is the initial admin with the right to call seedDelay(), setting starting state
+ *     without going through the schedule flow.
+ *   - After seeding, admin MUST call renounceAdmin() to make the contract fully self-governing.
+ *     `renounceAdmin` refuses to renounce until critical role-change delays have been seeded.
  *
- * Encoding for operation IDs:
+ * Encoding for proposal IDs:
  *   id = keccak256(abi.encode(target, data, predecessor, salt))
- *   _timestamps[id]:
- *     0   = never scheduled
- *     1   = scheduled and already executed (DONE marker)
- *     >1  = scheduled, becomes ready at that block timestamp
+ *   executableAt[id]:
+ *     0   = never scheduled (or cancelled)
+ *     1   = executed (DONE marker)
+ *     >1  = scheduled, becomes executable at that block timestamp
  */
 contract TieredTimelock is ReentrancyGuard {
+    using EnumerableSet for EnumerableSet.AddressSet;
+
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                            CONSTANTS
     ════════════════════════════════════════════════════════════════════════════════════════ */
@@ -48,8 +52,8 @@ contract TieredTimelock is ReentrancyGuard {
     /// @notice Upper bound on grace period.
     uint256 public constant MAX_GRACE_PERIOD = 30 days;
 
-    /// @dev Sentinel marker for executed operations.
-    uint256 private constant _DONE_TIMESTAMP = uint256(1);
+    /// @dev Sentinel value stored in `executableAt` to mark an executed proposal.
+    uint256 private constant _DONE_MARKER = uint256(1);
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                             STORAGE
@@ -61,25 +65,19 @@ contract TieredTimelock is ReentrancyGuard {
     /// @notice (target, selector) → minimum delay in seconds. Zero = instant execution.
     mapping(bytes32 key => uint256 delay) public delayOf;
 
-    /// @notice operation id → scheduled timestamp (0 unset, 1 done, >1 ready-at).
-    mapping(bytes32 id => uint256 timestamp) public timestampOf;
+    /// @notice proposal id → block timestamp at which the proposal becomes executable.
+    ///         0 = never scheduled (or cancelled). 1 = executed (DONE_MARKER). >1 = pending.
+    mapping(bytes32 id => uint256) public executableAt;
 
-    /// @notice Address → can call schedule().
-    mapping(address => bool) public isProposer;
-
-    /// @notice Address → can call cancel().
-    mapping(address => bool) public isCanceller;
-
-    /// @notice Number of active proposers. Cannot drop to zero (would brick the timelock).
-    uint256 public proposerCount;
-
-    /// @notice Number of active cancellers. Cannot drop to zero (would remove the only defense
-    ///         against a malicious scheduled action).
-    uint256 public cancellerCount;
-
-    /// @notice Time window after eta during which a matured operation may still be executed.
-    ///         After this window, the operation expires and must be re-scheduled.
+    /// @notice Time window after `executableAt` during which a matured proposal may still be
+    ///         executed. Past that window, the proposal expires and must be re-scheduled.
     uint256 public gracePeriod;
+
+    /// @dev Address set of proposers (can call schedule()).
+    EnumerableSet.AddressSet private _proposers;
+
+    /// @dev Address set of cancellers (can call cancel()).
+    EnumerableSet.AddressSet private _cancellers;
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                             EVENTS
@@ -119,9 +117,8 @@ contract TieredTimelock is ReentrancyGuard {
     error NotScheduled();
     error PredecessorNotDone();
     error TimelockNotExpired();
-    error OperationExpired();
+    error ProposalExpired();
     error MustSchedule();
-    error AdminAlreadyRenounced();
     error CallFailed(bytes returnData);
     error CannotRemoveLastProposer();
     error CannotRemoveLastCanceller();
@@ -135,12 +132,12 @@ contract TieredTimelock is ReentrancyGuard {
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
     modifier onlyProposer() {
-        if (!isProposer[msg.sender]) revert NotProposer();
+        if (!_proposers.contains(msg.sender)) revert NotProposer();
         _;
     }
 
     modifier onlyCanceller() {
-        if (!isCanceller[msg.sender]) revert NotCanceller();
+        if (!_cancellers.contains(msg.sender)) revert NotCanceller();
         _;
     }
 
@@ -149,7 +146,7 @@ contract TieredTimelock is ReentrancyGuard {
         _;
     }
 
-    /// @dev Self-governance: only callable as the result of a scheduled & executed operation.
+    /// @dev Self-governance: only callable as the result of a scheduled & executed proposal.
     modifier onlySelf() {
         if (msg.sender != address(this)) revert NotSelf();
         _;
@@ -160,10 +157,10 @@ contract TieredTimelock is ReentrancyGuard {
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
     /**
-     * @param admin_         Initial admin (allowed to seed delays and roles, then must renounce).
+     * @param admin_             Initial admin (allowed to seed delays, then must renounce).
      * @param initialProposers_  Addresses granted PROPOSER on day 0 (typically the governor Safe).
-     * @param initialCancellers_ Addresses granted CANCELLER on day 0 (typically Safe + security council).
-     * @param gracePeriod_   Initial grace period (e.g., 14 days).
+     * @param initialCancellers_ Addresses granted CANCELLER on day 0 (Safe + security council).
+     * @param gracePeriod_       Initial grace period (must be in [MIN_GRACE_PERIOD, MAX_GRACE_PERIOD]).
      */
     constructor(
         address admin_,
@@ -181,30 +178,26 @@ contract TieredTimelock is ReentrancyGuard {
         for (uint256 i; i < initialProposers_.length; ++i) {
             address p = initialProposers_[i];
             if (p == address(0)) revert ZeroAddress();
-            if (isProposer[p]) revert AlreadyRoleMember();
-            isProposer[p] = true;
-            ++proposerCount;
+            if (!_proposers.add(p)) revert AlreadyRoleMember();
             emit ProposerSet(p, true);
         }
-        if (proposerCount == 0) revert CannotRemoveLastProposer();
+        if (_proposers.length() == 0) revert CannotRemoveLastProposer();
 
         for (uint256 i; i < initialCancellers_.length; ++i) {
             address c = initialCancellers_[i];
             if (c == address(0)) revert ZeroAddress();
-            if (isCanceller[c]) revert AlreadyRoleMember();
-            isCanceller[c] = true;
-            ++cancellerCount;
+            if (!_cancellers.add(c)) revert AlreadyRoleMember();
             emit CancellerSet(c, true);
         }
-        if (cancellerCount == 0) revert CannotRemoveLastCanceller();
+        if (_cancellers.length() == 0) revert CannotRemoveLastCanceller();
     }
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                        VIEW HELPERS
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
-    /// @notice Compute operation id used internally.
-    function hashOperation(
+    /// @notice Compute the proposal id used internally as the key in `executableAt`.
+    function hashProposal(
         address target_,
         bytes calldata data_,
         bytes32 predecessor_,
@@ -213,25 +206,55 @@ contract TieredTimelock is ReentrancyGuard {
         return keccak256(abi.encode(target_, data_, predecessor_, salt_));
     }
 
-    /// @notice Compute the (target, selector) storage key for delayOf.
+    /// @notice Compute the (target, selector) storage key for `delayOf`.
     function delayKey(address target_, bytes4 selector_) public pure returns (bytes32) {
         return keccak256(abi.encodePacked(target_, selector_));
     }
 
-    /// @notice True if the operation is scheduled but not yet executed or cancelled.
+    /// @notice True if the proposal is scheduled but not yet executed or cancelled.
     function isPending(bytes32 id_) public view returns (bool) {
-        return timestampOf[id_] > _DONE_TIMESTAMP;
+        return executableAt[id_] > _DONE_MARKER;
     }
 
-    /// @notice True if the operation has been executed.
+    /// @notice True if the proposal has been executed.
     function isDone(bytes32 id_) public view returns (bool) {
-        return timestampOf[id_] == _DONE_TIMESTAMP;
+        return executableAt[id_] == _DONE_MARKER;
     }
 
-    /// @notice True if the operation is matured (eta passed) AND still within grace period.
+    /// @notice True if the proposal is matured (executableAt passed) AND still within grace period.
     function isReady(bytes32 id_) public view returns (bool) {
-        uint256 t = timestampOf[id_];
-        return t > _DONE_TIMESTAMP && t <= block.timestamp && block.timestamp <= t + gracePeriod;
+        uint256 at = executableAt[id_];
+        return at > _DONE_MARKER && at <= block.timestamp && block.timestamp <= at + gracePeriod;
+    }
+
+    /// @notice True if `account` is a proposer.
+    function isProposer(address account_) external view returns (bool) {
+        return _proposers.contains(account_);
+    }
+
+    /// @notice True if `account` is a canceller.
+    function isCanceller(address account_) external view returns (bool) {
+        return _cancellers.contains(account_);
+    }
+
+    /// @notice Number of active proposers.
+    function proposerCount() external view returns (uint256) {
+        return _proposers.length();
+    }
+
+    /// @notice Number of active cancellers.
+    function cancellerCount() external view returns (uint256) {
+        return _cancellers.length();
+    }
+
+    /// @notice All current proposer addresses.
+    function getProposers() external view returns (address[] memory) {
+        return _proposers.values();
+    }
+
+    /// @notice All current canceller addresses.
+    function getCancellers() external view returns (address[] memory) {
+        return _cancellers.values();
     }
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
@@ -239,9 +262,9 @@ contract TieredTimelock is ReentrancyGuard {
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
     /**
-     * @notice Schedule a call. Anyone holding PROPOSER may schedule. ETA is computed from delayOf.
-     *         For functions targeting this contract's own `decreaseDelay`, the ETA uses the TARGET
-     *         selector's current delay so a delay reduction cannot be fast-pathed.
+     * @notice Schedule a proposal. Proposer-only. `executableAt` is computed from `delayOf`.
+     *         For proposals targeting this contract's own `decreaseDelay`, `executableAt` uses the
+     *         TARGET selector's current delay so a delay reduction cannot be fast-pathed.
      */
     function schedule(
         address target_,
@@ -255,21 +278,21 @@ contract TieredTimelock is ReentrancyGuard {
         bytes4 sel = bytes4(data_[:4]);
         uint256 delay = _resolveDelay(target_, sel, data_);
 
-        id = hashOperation(target_, data_, predecessor_, salt_);
-        if (timestampOf[id] != 0) revert AlreadyScheduled();
+        id = hashProposal(target_, data_, predecessor_, salt_);
+        if (executableAt[id] != 0) revert AlreadyScheduled();
 
-        uint256 eta = block.timestamp + delay;
-        timestampOf[id] = eta;
+        uint256 at = block.timestamp + delay;
+        executableAt[id] = at;
 
-        emit Scheduled(id, target_, data_, predecessor_, salt_, eta);
+        emit Scheduled(id, target_, data_, predecessor_, salt_, at);
     }
 
     /**
-     * @notice Execute a previously scheduled operation. Permissionless after eta.
-     *         When delayOf[target, selector] == 0 and no schedule exists, the proposer may execute
-     *         in a single tx without scheduling first.
+     * @notice Execute a previously scheduled proposal. Permissionless after `executableAt`.
+     *         When `delayOf[target, selector] == 0` and no schedule exists, the proposer may
+     *         execute in a single tx without scheduling first.
      *
-     *         If predecessor_ != 0, that operation must be `done` before this one can execute.
+     *         If `predecessor_ != 0`, that proposal must be `done` before this one can execute.
      */
     function execute(
         address target_,
@@ -280,29 +303,28 @@ contract TieredTimelock is ReentrancyGuard {
         if (target_ == address(0)) revert ZeroAddress();
         if (data_.length < 4) revert ZeroSelector();
 
-        bytes32 id = hashOperation(target_, data_, predecessor_, salt_);
-        uint256 t = timestampOf[id];
+        bytes32 id = hashProposal(target_, data_, predecessor_, salt_);
+        uint256 at = executableAt[id];
 
-        if (t == 0) {
+        if (at == 0) {
             // Not scheduled: only allowed if delay is 0 AND caller is a proposer.
             bytes4 sel = bytes4(data_[:4]);
             uint256 delay = _resolveDelay(target_, sel, data_);
             if (delay != 0) revert MustSchedule();
-            if (!isProposer[msg.sender]) revert NotProposer();
-        } else if (t == _DONE_TIMESTAMP) {
-            // Already executed.
+            if (!_proposers.contains(msg.sender)) revert NotProposer();
+        } else if (at == _DONE_MARKER) {
             revert AlreadyScheduled();
         } else {
-            if (block.timestamp < t) revert TimelockNotExpired();
-            if (block.timestamp > t + gracePeriod) revert OperationExpired();
+            if (block.timestamp < at) revert TimelockNotExpired();
+            if (block.timestamp > at + gracePeriod) revert ProposalExpired();
         }
 
-        if (predecessor_ != bytes32(0) && timestampOf[predecessor_] != _DONE_TIMESTAMP) {
+        if (predecessor_ != bytes32(0) && executableAt[predecessor_] != _DONE_MARKER) {
             revert PredecessorNotDone();
         }
 
         // Mark done BEFORE the external call (CEI).
-        timestampOf[id] = _DONE_TIMESTAMP;
+        executableAt[id] = _DONE_MARKER;
 
         (bool ok, bytes memory ret) = target_.call{value: msg.value}(data_);
         if (!ok) revert CallFailed(ret);
@@ -312,13 +334,13 @@ contract TieredTimelock is ReentrancyGuard {
     }
 
     /**
-     * @notice Cancel a pending operation. Callable by anyone with CANCELLER.
-     *         Cannot cancel done or never-scheduled operations.
+     * @notice Cancel a pending proposal. Callable by any canceller.
+     *         Cannot cancel done or never-scheduled proposals.
      */
     function cancel(bytes32 id_) external onlyCanceller {
-        uint256 t = timestampOf[id_];
-        if (t == 0 || t == _DONE_TIMESTAMP) revert NotScheduled();
-        delete timestampOf[id_];
+        uint256 at = executableAt[id_];
+        if (at == 0 || at == _DONE_MARKER) revert NotScheduled();
+        delete executableAt[id_];
         emit Cancelled(id_, msg.sender);
     }
 
@@ -327,8 +349,8 @@ contract TieredTimelock is ReentrancyGuard {
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
     /**
-     * @notice Raise the delay for a (target, selector). Scheduled by its own selector's delay
-     *         (default 0 → instant initially; raise this delay first to slow itself down).
+     * @notice Raise the delay for a (target, selector). Scheduling delay = its own selector's delay
+     *         (default 0 → instant initially; raise this delay first to slow down future increases).
      */
     function increaseDelay(address target_, bytes4 selector_, uint256 newDelay_) external onlySelf {
         if (newDelay_ > MAX_DELAY) revert DelayTooLong();
@@ -340,8 +362,8 @@ contract TieredTimelock is ReentrancyGuard {
     }
 
     /**
-     * @notice Lower the delay for a (target, selector). Scheduled at the TARGET selector's CURRENT
-     *         delay so a delay can never be reduced faster than it currently holds.
+     * @notice Lower the delay for a (target, selector). Scheduling delay = TARGET selector's CURRENT
+     *         delay, so a delay can never be reduced faster than it currently holds.
      */
     function decreaseDelay(address target_, bytes4 selector_, uint256 newDelay_) external onlySelf {
         bytes32 key = delayKey(target_, selector_);
@@ -351,41 +373,31 @@ contract TieredTimelock is ReentrancyGuard {
         emit DelaySet(target_, selector_, old, newDelay_);
     }
 
-    /// @notice Add a proposer. Self-governed. No-op if already a proposer (idempotent retry).
+    /// @notice Add a proposer. Self-governed. Reverts if already a member.
     function addProposer(address account_) external onlySelf {
         if (account_ == address(0)) revert ZeroAddress();
-        if (isProposer[account_]) revert AlreadyRoleMember();
-        isProposer[account_] = true;
-        ++proposerCount;
+        if (!_proposers.add(account_)) revert AlreadyRoleMember();
         emit ProposerSet(account_, true);
     }
 
-    /// @notice Remove a proposer. Self-governed. Reverts if this would leave zero proposers
-    ///         (otherwise the timelock would be bricked — no one could ever schedule again).
+    /// @notice Remove a proposer. Reverts if this would leave zero proposers (would brick timelock).
     function removeProposer(address account_) external onlySelf {
-        if (!isProposer[account_]) revert NotRoleMember();
-        if (proposerCount <= 1) revert CannotRemoveLastProposer();
-        isProposer[account_] = false;
-        --proposerCount;
+        if (_proposers.length() <= 1) revert CannotRemoveLastProposer();
+        if (!_proposers.remove(account_)) revert NotRoleMember();
         emit ProposerSet(account_, false);
     }
 
-    /// @notice Add a canceller. Self-governed. No-op if already a canceller.
+    /// @notice Add a canceller. Self-governed. Reverts if already a member.
     function addCanceller(address account_) external onlySelf {
         if (account_ == address(0)) revert ZeroAddress();
-        if (isCanceller[account_]) revert AlreadyRoleMember();
-        isCanceller[account_] = true;
-        ++cancellerCount;
+        if (!_cancellers.add(account_)) revert AlreadyRoleMember();
         emit CancellerSet(account_, true);
     }
 
-    /// @notice Remove a canceller. Self-governed. Reverts if this would leave zero cancellers
-    ///         (defense against malicious schedules would be eliminated).
+    /// @notice Remove a canceller. Reverts if this would leave zero cancellers (defense removed).
     function removeCanceller(address account_) external onlySelf {
-        if (!isCanceller[account_]) revert NotRoleMember();
-        if (cancellerCount <= 1) revert CannotRemoveLastCanceller();
-        isCanceller[account_] = false;
-        --cancellerCount;
+        if (_cancellers.length() <= 1) revert CannotRemoveLastCanceller();
+        if (!_cancellers.remove(account_)) revert NotRoleMember();
         emit CancellerSet(account_, false);
     }
 
@@ -420,14 +432,12 @@ contract TieredTimelock is ReentrancyGuard {
     }
 
     /**
-     * @notice Renounce admin role. After this is called the contract is fully self-governing:
-     *         delays, roles, and grace period can only be changed via the schedule/execute flow.
-     *         IRREVERSIBLE.
+     * @notice Renounce admin role. IRREVERSIBLE. After this, delays / roles / grace period can
+     *         only be changed via the schedule → execute flow.
      *
      *         Refuses to renounce while critical role-change and config selectors have delay = 0,
      *         since those functions would otherwise be permanently single-tx-callable by any
-     *         compromised proposer. This guarantees the contract enters self-governance in a safe
-     *         state. The deployer must seed these delays via `seedDelay` before calling renounce.
+     *         compromised proposer. Guarantees the contract enters self-governance in a safe state.
      */
     function renounceAdmin() external onlyAdmin {
         _requireCriticalDelaySet(TieredTimelock.addProposer.selector);
@@ -477,6 +487,6 @@ contract TieredTimelock is ReentrancyGuard {
                                           ETH HANDLING
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
-    /// @notice Allow the contract to receive ETH so it can forward msg.value to payable target calls.
+    /// @notice Allow the contract to receive ETH so it can forward msg.value to payable targets.
     receive() external payable {}
 }
