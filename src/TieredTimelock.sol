@@ -31,8 +31,15 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  *
  * ETH-input proposals:
  *   Proposals can carry ETH via the `value` parameter. The value is part of the proposal hash,
- *   so the amount forwarded to the target is fixed at schedule time. At execute time, msg.value
- *   must equal the scheduled value (`ValueMismatch` otherwise). Whoever executes supplies the ETH.
+ *   so the amount forwarded to the target is fixed at schedule time. At execute time, the
+ *   timelock forwards exactly `value` to the target; msg.value is optional and treated as
+ *   additional funding for the timelock's own balance. Excess msg.value beyond what the call
+ *   consumes remains in the timelock and can be swept via a governance proposal.
+ *
+ *   For proposals with a variable native-token fee (e.g., LayerZero bridging), the proposer
+ *   should either (a) schedule with a conservative upper-bound value and rely on the target
+ *   to refund excess to msg.sender = timelock, or (b) route through a helper contract that
+ *   queries the live fee at execute time.
  *
  * Encoding for proposal IDs:
  *   id = keccak256(abi.encode(target, value, data, predecessor, salt))
@@ -126,7 +133,6 @@ contract TieredTimelock is ReentrancyGuard {
     error ProposalExpired();
     error MustSchedule();
     error CallFailed(bytes returnData);
-    error ValueMismatch(uint256 expected, uint256 actual);
     error CannotRemoveLastProposer();
     error CannotRemoveLastCanceller();
     error AlreadyRoleMember();
@@ -304,9 +310,10 @@ contract TieredTimelock is ReentrancyGuard {
      *         When `delayOf[target, selector] == 0` and no schedule exists, the proposer may
      *         execute in a single tx without scheduling first.
      *
-     *         `value_` must match the value used at schedule time (or 0 for the delay-0 shortcut).
-     *         msg.value must equal `value_`; the caller supplies the ETH that gets forwarded to
-     *         the target.
+     *         `value_` must match the value used at schedule time. The timelock forwards
+     *         exactly `value_` to the target; the ETH may come from msg.value attached to this
+     *         call, from the timelock's pre-existing balance, or a combination. Any msg.value
+     *         beyond what the call uses stays in the timelock.
      *
      *         If `predecessor_ != 0`, that proposal must be `done` before this one can execute.
      */
@@ -319,7 +326,6 @@ contract TieredTimelock is ReentrancyGuard {
     ) external payable nonReentrant returns (bytes memory) {
         if (target_ == address(0)) revert ZeroAddress();
         if (data_.length < 4) revert ZeroSelector();
-        if (msg.value != value_) revert ValueMismatch(value_, msg.value);
 
         bytes32 _id = hashProposal(target_, value_, data_, predecessor_, salt_);
         uint256 _at = executableAt[_id];

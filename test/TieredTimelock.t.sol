@@ -568,9 +568,9 @@ contract TieredTimelockTest is Test {
         assertEq(address(target).balance, 3 ether);
     }
 
-    /// @notice Scheduled ETH proposal: value is fixed at schedule; permissionless execute must
-    ///         supply matching ETH.
-    function test_ethScheduled_executeMustSupplyExactValue() public {
+    /// @notice Scheduled ETH proposal: value is fixed at schedule; timelock forwards value_ to
+    ///         the target, drawing from timelock balance and/or msg.value attached at execute.
+    function test_ethScheduled_executeForwardsValue() public {
         vm.prank(admin);
         tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
 
@@ -581,30 +581,81 @@ contract TieredTimelockTest is Test {
 
         vm.warp(block.timestamp + 1 days);
 
-        // Executor attaches wrong amount → revert.
         vm.deal(stranger, 5 ether);
-        vm.prank(stranger);
-        vm.expectRevert(
-            abi.encodeWithSelector(TieredTimelock.ValueMismatch.selector, 2 ether, 1 ether)
-        );
-        tl.execute{value: 1 ether}(address(target), 2 ether, _data, bytes32(0), bytes32(0));
-
-        // Executor attaches 0 → revert.
-        vm.prank(stranger);
-        vm.expectRevert(
-            abi.encodeWithSelector(TieredTimelock.ValueMismatch.selector, 2 ether, 0)
-        );
-        tl.execute(address(target), 2 ether, _data, bytes32(0), bytes32(0));
-
-        // Executor attaches exact amount → succeeds.
         vm.prank(stranger);
         tl.execute{value: 2 ether}(address(target), 2 ether, _data, bytes32(0), bytes32(0));
         assertEq(target.value(), 2 ether);
         assertEq(address(target).balance, 2 ether);
     }
 
-    /// @notice Scheduled ETH proposal cannot be re-executed with a different value (different id).
-    function test_ethScheduled_wrongValueIdDoesNotMatchSchedule() public {
+    /// @notice Pre-fund the timelock, execute with msg.value = 0 — timelock's own balance is used.
+    function test_ethScheduled_preFundedTimelock_executorAttachesNothing() public {
+        vm.prank(admin);
+        tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
+
+        // Pre-fund the timelock with 3 ETH (via receive()).
+        vm.deal(address(this), 3 ether);
+        (bool _ok, ) = address(tl).call{value: 3 ether}("");
+        assertTrue(_ok);
+        assertEq(address(tl).balance, 3 ether);
+
+        bytes memory _data = abi.encodeCall(TargetMock.depositETH, ());
+        vm.prank(proposer);
+        tl.schedule(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+
+        vm.warp(block.timestamp + 1 days);
+
+        // Executor (a bot with no ETH) triggers execution — timelock's own balance funds it.
+        address _bot = makeAddr("bot");
+        vm.prank(_bot);
+        tl.execute(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+
+        assertEq(target.value(), 2 ether);
+        assertEq(address(target).balance, 2 ether);
+        assertEq(address(tl).balance, 1 ether); // 3 pre-funded - 2 forwarded = 1 left
+    }
+
+    /// @notice Overpaying at execute time leaves the excess in the timelock.
+    function test_ethScheduled_overpayLeavesExcessInTimelock() public {
+        vm.prank(admin);
+        tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
+
+        bytes memory _data = abi.encodeCall(TargetMock.depositETH, ());
+        vm.prank(proposer);
+        tl.schedule(address(target), 1 ether, _data, bytes32(0), bytes32(0));
+
+        vm.warp(block.timestamp + 1 days);
+
+        vm.deal(stranger, 5 ether);
+        vm.prank(stranger);
+        // Executor attaches 5 ETH but the proposal only forwards 1 ETH.
+        tl.execute{value: 5 ether}(address(target), 1 ether, _data, bytes32(0), bytes32(0));
+
+        assertEq(target.value(), 1 ether);
+        assertEq(address(target).balance, 1 ether);
+        assertEq(address(tl).balance, 4 ether); // 5 attached - 1 forwarded = 4 stuck
+    }
+
+    /// @notice If neither pre-funded nor msg.value covers value_, the target.call fails.
+    function test_ethScheduled_insufficientBalanceReverts() public {
+        vm.prank(admin);
+        tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
+
+        bytes memory _data = abi.encodeCall(TargetMock.depositETH, ());
+        vm.prank(proposer);
+        tl.schedule(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+
+        vm.warp(block.timestamp + 1 days);
+
+        // Timelock has 0 balance, executor attaches 1 ETH — not enough for 2 ETH forward.
+        vm.deal(stranger, 5 ether);
+        vm.prank(stranger);
+        vm.expectRevert(); // low-level call fails due to insufficient balance
+        tl.execute{value: 1 ether}(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+    }
+
+    /// @notice A schedule at one value cannot be executed at a different value (id mismatch).
+    function test_ethScheduled_differentValueIsUnauthorized() public {
         vm.prank(admin);
         tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
 
