@@ -675,6 +675,131 @@ contract TieredTimelockTest is Test {
     }
 
     /* ════════════════════════════════════════════════════════════════════════
+                                  BATCH SCHEDULE / EXECUTE
+    ════════════════════════════════════════════════════════════════════════ */
+
+    function test_batch_scheduleAndExecute_usesMaxDelay() public {
+        // Two calls with different configured delays; batch delay = max(1 day, 3 days) = 3 days.
+        vm.startPrank(admin);
+        tl.seedDelay(address(target), TargetMock.setValue.selector, 1 days);
+        tl.seedDelay(address(target), TargetMock.setSecondValue.selector, 3 days);
+        vm.stopPrank();
+
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(target);
+        _targets[1] = address(target);
+        uint256[] memory _values = new uint256[](2);
+        bytes[] memory _data = new bytes[](2);
+        _data[0] = abi.encodeCall(TargetMock.setValue, (10));
+        _data[1] = abi.encodeCall(TargetMock.setSecondValue, (20));
+
+        vm.prank(proposer);
+        bytes32 _id = tl.scheduleBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+        assertTrue(tl.isPending(_id));
+
+        // Before 3 days pass, execute reverts.
+        vm.warp(block.timestamp + 3 days - 1);
+        vm.expectRevert(TieredTimelock.TimelockNotExpired.selector);
+        tl.executeBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+
+        vm.warp(block.timestamp + 2);
+        tl.executeBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+        assertEq(target.value(), 10);
+        assertEq(target.secondValue(), 20);
+        assertTrue(tl.isDone(_id));
+    }
+
+    function test_batch_atomic_ifOneCallReverts_wholeBatchReverts() public {
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(target);
+        _targets[1] = address(target);
+        uint256[] memory _values = new uint256[](2);
+        bytes[] memory _data = new bytes[](2);
+        _data[0] = abi.encodeCall(TargetMock.setValue, (10));
+        _data[1] = abi.encodeCall(TargetMock.revertingFunction, ());
+
+        vm.prank(proposer);
+        vm.expectRevert(); // CallFailed wrapping AlwaysReverts
+        tl.executeBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+
+        assertEq(target.value(), 0); // first call rolled back
+    }
+
+    function test_batch_delayZeroShortcut() public {
+        // All-zero-delay batch: proposer can execute in a single tx.
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(target);
+        _targets[1] = address(target);
+        uint256[] memory _values = new uint256[](2);
+        bytes[] memory _data = new bytes[](2);
+        _data[0] = abi.encodeCall(TargetMock.setValue, (1));
+        _data[1] = abi.encodeCall(TargetMock.setSecondValue, (2));
+
+        vm.prank(proposer);
+        tl.executeBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+        assertEq(target.value(), 1);
+        assertEq(target.secondValue(), 2);
+    }
+
+    function test_batch_ethValues_forwardedPerSubCall() public {
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(target);
+        _targets[1] = address(target);
+        uint256[] memory _values = new uint256[](2);
+        _values[0] = 1 ether;
+        _values[1] = 2 ether;
+        bytes[] memory _data = new bytes[](2);
+        _data[0] = abi.encodeCall(TargetMock.depositETH, ());
+        _data[1] = abi.encodeCall(TargetMock.depositETH, ());
+
+        vm.deal(proposer, 5 ether);
+        vm.prank(proposer);
+        tl.executeBatch{value: 3 ether}(_targets, _values, _data, bytes32(0), bytes32(0));
+
+        // Target got value=2 ether from the second call (overwrote value from the first).
+        assertEq(target.value(), 2 ether);
+        assertEq(address(target).balance, 3 ether);
+    }
+
+    function test_batch_emptyReverts() public {
+        address[] memory _targets = new address[](0);
+        uint256[] memory _values = new uint256[](0);
+        bytes[] memory _data = new bytes[](0);
+
+        vm.prank(proposer);
+        vm.expectRevert(TieredTimelock.EmptyBatch.selector);
+        tl.scheduleBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+    }
+
+    function test_batch_mismatchedLengthsRevert() public {
+        address[] memory _targets = new address[](2);
+        _targets[0] = address(target);
+        _targets[1] = address(target);
+        uint256[] memory _values = new uint256[](1); // wrong length
+        bytes[] memory _data = new bytes[](2);
+        _data[0] = abi.encodeCall(TargetMock.setValue, (1));
+        _data[1] = abi.encodeCall(TargetMock.setSecondValue, (2));
+
+        vm.prank(proposer);
+        vm.expectRevert(TieredTimelock.InvalidBatchLength.selector);
+        tl.scheduleBatch(_targets, _values, _data, bytes32(0), bytes32(0));
+    }
+
+    function test_batch_differentIdFromSingle() public {
+        // A one-element batch with the same call as a single-call schedule should have a
+        // DIFFERENT id — batch and single occupy separate id spaces.
+        address[] memory _targets = new address[](1);
+        _targets[0] = address(target);
+        uint256[] memory _values = new uint256[](1);
+        bytes[] memory _data = new bytes[](1);
+        _data[0] = abi.encodeCall(TargetMock.setValue, (1));
+
+        bytes32 _batchId = tl.hashBatchProposal(_targets, _values, _data, bytes32(0), bytes32(0));
+        bytes32 _singleId = tl.hashProposal(address(target), 0, _data[0], bytes32(0), bytes32(0));
+        assertTrue(_batchId != _singleId);
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
                                   NFT RECEIVER HOOKS
     ════════════════════════════════════════════════════════════════════════ */
 

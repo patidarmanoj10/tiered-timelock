@@ -113,6 +113,16 @@ contract TieredTimelock is ReentrancyGuard, ERC721Holder, ERC1155Holder {
     event CancellerSet(address indexed canceller, bool allowed);
     event GracePeriodSet(uint256 oldPeriod, uint256 newPeriod);
     event AdminRenounced();
+    event BatchScheduled(
+        bytes32 indexed id,
+        address[] targets,
+        uint256[] values,
+        bytes[] data,
+        bytes32 predecessor,
+        bytes32 salt,
+        uint256 executableAt
+    );
+    event BatchExecuted(bytes32 indexed id, address[] targets, uint256[] values, bytes[] data);
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                             ERRORS
@@ -141,6 +151,8 @@ contract TieredTimelock is ReentrancyGuard, ERC721Holder, ERC1155Holder {
     error NotRoleMember();
     error CriticalDelayNotSeeded(bytes4 selector);
     error AlreadySeeded(address target, bytes4 selector);
+    error InvalidBatchLength();
+    error EmptyBatch();
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                           MODIFIERS
@@ -220,6 +232,19 @@ contract TieredTimelock is ReentrancyGuard, ERC721Holder, ERC1155Holder {
         bytes32 salt_
     ) public pure returns (bytes32) {
         return keccak256(abi.encode(target_, value_, data_, predecessor_, salt_));
+    }
+
+    /// @notice Compute the proposal id for a batch operation.
+    ///         Note: batch ids are computed over the full arrays, so a single-call and a
+    ///         one-element batch with the same call produce DIFFERENT ids and cannot be confused.
+    function hashBatchProposal(
+        address[] calldata targets_,
+        uint256[] calldata values_,
+        bytes[] calldata data_,
+        bytes32 predecessor_,
+        bytes32 salt_
+    ) public pure returns (bytes32) {
+        return keccak256(abi.encode(targets_, values_, data_, predecessor_, salt_));
     }
 
     /// @notice Compute the (target, selector) storage key for `delayOf`.
@@ -368,6 +393,103 @@ contract TieredTimelock is ReentrancyGuard, ERC721Holder, ERC1155Holder {
         if (_at == 0 || _at == DONE_MARKER) revert NotScheduled();
         delete executableAt[id_];
         emit Cancelled(id_, msg.sender);
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════════════════════
+                                     BATCH SCHEDULE / EXECUTE
+    ════════════════════════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * @notice Schedule a batch of calls as a single atomic proposal.
+     *         The batch's `executableAt` is `now + max(delayOf[targets_[i], selectors[i]])` — the
+     *         batch cannot execute until every individual call's delay has elapsed. This preserves
+     *         the security property that no call can happen faster than its own configured delay.
+     *
+     *         All arrays must be the same non-zero length. Individual reverts abort the whole batch.
+     */
+    function scheduleBatch(
+        address[] calldata targets_,
+        uint256[] calldata values_,
+        bytes[] calldata data_,
+        bytes32 predecessor_,
+        bytes32 salt_
+    ) external onlyProposer returns (bytes32 _id) {
+        uint256 _len = targets_.length;
+        if (_len == 0) revert EmptyBatch();
+        if (_len != values_.length || _len != data_.length) revert InvalidBatchLength();
+
+        uint256 _maxDelay;
+        for (uint256 _i; _i < _len; ++_i) {
+            if (targets_[_i] == address(0)) revert ZeroAddress();
+            if (data_[_i].length < 4) revert ZeroSelector();
+            bytes4 _sel = bytes4(data_[_i][:4]);
+            uint256 _d = _resolveDelay(targets_[_i], _sel, data_[_i]);
+            if (_d > _maxDelay) _maxDelay = _d;
+        }
+
+        _id = hashBatchProposal(targets_, values_, data_, predecessor_, salt_);
+        if (executableAt[_id] != 0) revert AlreadyScheduled();
+
+        uint256 _at = block.timestamp + _maxDelay;
+        executableAt[_id] = _at;
+
+        emit BatchScheduled(_id, targets_, values_, data_, predecessor_, salt_, _at);
+    }
+
+    /**
+     * @notice Execute a scheduled batch. Permissionless after eta.
+     *         When every constituent selector has `delayOf == 0` and no schedule exists, the
+     *         proposer may execute in a single tx without scheduling first.
+     *
+     *         If any sub-call reverts, the entire batch reverts (atomic). ETH forwarded per sub-call
+     *         is drawn from msg.value + timelock balance; total insufficient balance reverts.
+     */
+    function executeBatch(
+        address[] calldata targets_,
+        uint256[] calldata values_,
+        bytes[] calldata data_,
+        bytes32 predecessor_,
+        bytes32 salt_
+    ) external payable nonReentrant returns (bytes[] memory returns_) {
+        uint256 _len = targets_.length;
+        if (_len == 0) revert EmptyBatch();
+        if (_len != values_.length || _len != data_.length) revert InvalidBatchLength();
+
+        bytes32 _id = hashBatchProposal(targets_, values_, data_, predecessor_, salt_);
+        uint256 _at = executableAt[_id];
+
+        if (_at == 0) {
+            // Not scheduled: allowed only if every selector's delay is 0 AND caller is a proposer.
+            for (uint256 _i; _i < _len; ++_i) {
+                if (targets_[_i] == address(0)) revert ZeroAddress();
+                if (data_[_i].length < 4) revert ZeroSelector();
+                bytes4 _sel = bytes4(data_[_i][:4]);
+                uint256 _d = _resolveDelay(targets_[_i], _sel, data_[_i]);
+                if (_d != 0) revert MustSchedule();
+            }
+            if (!proposers.contains(msg.sender)) revert NotProposer();
+        } else if (_at == DONE_MARKER) {
+            revert AlreadyScheduled();
+        } else {
+            if (block.timestamp < _at) revert TimelockNotExpired();
+            if (block.timestamp > _at + gracePeriod) revert ProposalExpired();
+        }
+
+        if (predecessor_ != bytes32(0) && executableAt[predecessor_] != DONE_MARKER) {
+            revert PredecessorNotDone();
+        }
+
+        // Mark done BEFORE the external calls (CEI).
+        executableAt[_id] = DONE_MARKER;
+
+        returns_ = new bytes[](_len);
+        for (uint256 _i; _i < _len; ++_i) {
+            (bool _ok, bytes memory _ret) = targets_[_i].call{value: values_[_i]}(data_[_i]);
+            if (!_ok) revert CallFailed(_ret);
+            returns_[_i] = _ret;
+        }
+
+        emit BatchExecuted(_id, targets_, values_, data_);
     }
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
