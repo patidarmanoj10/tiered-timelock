@@ -3,6 +3,8 @@ pragma solidity 0.8.24;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+import {ERC721Holder} from "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
+import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155Holder.sol";
 
 /**
  * @title TieredTimelock
@@ -48,7 +50,7 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  *     1   = executed (DONE_MARKER)
  *     >1  = scheduled, becomes executable at that block timestamp
  */
-contract TieredTimelock is ReentrancyGuard {
+contract TieredTimelock is ReentrancyGuard, ERC721Holder, ERC1155Holder {
     using EnumerableSet for EnumerableSet.AddressSet;
 
     /* ════════════════════════════════════════════════════════════════════════════════════════

@@ -4,6 +4,7 @@ pragma solidity 0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {TieredTimelock} from "../src/TieredTimelock.sol";
 import {TargetMock} from "./mocks/TargetMock.sol";
+import {Erc721Mock, Erc1155Mock} from "./mocks/NftMock.sol";
 
 contract TieredTimelockTest is Test {
     // ─── actors ─────────────────────────────────────────────────────────────
@@ -671,6 +672,47 @@ contract TieredTimelockTest is Test {
         vm.prank(proposer);
         vm.expectRevert(TieredTimelock.MustSchedule.selector);
         tl.execute{value: 1 ether}(address(target), 1 ether, _data, bytes32(0), bytes32(0));
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+                                  NFT RECEIVER HOOKS
+    ════════════════════════════════════════════════════════════════════════ */
+
+    function test_receivesERC721SafeTransfer() public {
+        Erc721Mock _nft = new Erc721Mock();
+        _nft.mint(stranger, 42);
+
+        vm.prank(stranger);
+        _nft.safeTransferFrom(stranger, address(tl), 42);
+
+        assertEq(_nft.ownerOf(42), address(tl));
+    }
+
+    function test_receivesERC1155SafeTransfer() public {
+        Erc1155Mock _nft = new Erc1155Mock();
+        _nft.mint(stranger, 7, 100);
+
+        vm.prank(stranger);
+        _nft.safeTransferFrom(stranger, address(tl), 7, 25, "");
+
+        assertEq(_nft.balanceOf(address(tl), 7), 25);
+    }
+
+    function test_receivesERC1155BatchSafeTransfer() public {
+        Erc1155Mock _nft = new Erc1155Mock();
+        uint256[] memory _ids = new uint256[](2);
+        _ids[0] = 1;
+        _ids[1] = 2;
+        uint256[] memory _amounts = new uint256[](2);
+        _amounts[0] = 10;
+        _amounts[1] = 20;
+        _nft.mintBatch(stranger, _ids, _amounts);
+
+        vm.prank(stranger);
+        _nft.safeBatchTransferFrom(stranger, address(tl), _ids, _amounts, "");
+
+        assertEq(_nft.balanceOf(address(tl), 1), 10);
+        assertEq(_nft.balanceOf(address(tl), 2), 20);
     }
 
     /* ════════════════════════════════════════════════════════════════════════
