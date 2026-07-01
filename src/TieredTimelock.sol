@@ -33,7 +33,7 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  *   id = keccak256(abi.encode(target, data, predecessor, salt))
  *   executableAt[id]:
  *     0   = never scheduled (or cancelled)
- *     1   = executed (DONE marker)
+ *     1   = executed (DONE_MARKER)
  *     >1  = scheduled, becomes executable at that block timestamp
  */
 contract TieredTimelock is ReentrancyGuard {
@@ -53,7 +53,7 @@ contract TieredTimelock is ReentrancyGuard {
     uint256 public constant MAX_GRACE_PERIOD = 30 days;
 
     /// @dev Sentinel value stored in `executableAt` to mark an executed proposal.
-    uint256 private constant _DONE_MARKER = uint256(1);
+    uint256 private constant DONE_MARKER = uint256(1);
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                             STORAGE
@@ -73,11 +73,11 @@ contract TieredTimelock is ReentrancyGuard {
     ///         executed. Past that window, the proposal expires and must be re-scheduled.
     uint256 public gracePeriod;
 
-    /// @dev Address set of proposers (can call schedule()).
-    EnumerableSet.AddressSet private _proposers;
+    /// @dev Set of proposers (can call schedule()).
+    EnumerableSet.AddressSet private proposers;
 
-    /// @dev Address set of cancellers (can call cancel()).
-    EnumerableSet.AddressSet private _cancellers;
+    /// @dev Set of cancellers (can call cancel()).
+    EnumerableSet.AddressSet private cancellers;
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
                                             EVENTS
@@ -132,12 +132,12 @@ contract TieredTimelock is ReentrancyGuard {
     ════════════════════════════════════════════════════════════════════════════════════════ */
 
     modifier onlyProposer() {
-        if (!_proposers.contains(msg.sender)) revert NotProposer();
+        if (!proposers.contains(msg.sender)) revert NotProposer();
         _;
     }
 
     modifier onlyCanceller() {
-        if (!_cancellers.contains(msg.sender)) revert NotCanceller();
+        if (!cancellers.contains(msg.sender)) revert NotCanceller();
         _;
     }
 
@@ -175,21 +175,21 @@ contract TieredTimelock is ReentrancyGuard {
         gracePeriod = gracePeriod_;
         emit GracePeriodSet(0, gracePeriod_);
 
-        for (uint256 i; i < initialProposers_.length; ++i) {
-            address p = initialProposers_[i];
-            if (p == address(0)) revert ZeroAddress();
-            if (!_proposers.add(p)) revert AlreadyRoleMember();
-            emit ProposerSet(p, true);
+        for (uint256 _i; _i < initialProposers_.length; ++_i) {
+            address _p = initialProposers_[_i];
+            if (_p == address(0)) revert ZeroAddress();
+            if (!proposers.add(_p)) revert AlreadyRoleMember();
+            emit ProposerSet(_p, true);
         }
-        if (_proposers.length() == 0) revert CannotRemoveLastProposer();
+        if (proposers.length() == 0) revert CannotRemoveLastProposer();
 
-        for (uint256 i; i < initialCancellers_.length; ++i) {
-            address c = initialCancellers_[i];
-            if (c == address(0)) revert ZeroAddress();
-            if (!_cancellers.add(c)) revert AlreadyRoleMember();
-            emit CancellerSet(c, true);
+        for (uint256 _i; _i < initialCancellers_.length; ++_i) {
+            address _c = initialCancellers_[_i];
+            if (_c == address(0)) revert ZeroAddress();
+            if (!cancellers.add(_c)) revert AlreadyRoleMember();
+            emit CancellerSet(_c, true);
         }
-        if (_cancellers.length() == 0) revert CannotRemoveLastCanceller();
+        if (cancellers.length() == 0) revert CannotRemoveLastCanceller();
     }
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
@@ -213,48 +213,48 @@ contract TieredTimelock is ReentrancyGuard {
 
     /// @notice True if the proposal is scheduled but not yet executed or cancelled.
     function isPending(bytes32 id_) public view returns (bool) {
-        return executableAt[id_] > _DONE_MARKER;
+        return executableAt[id_] > DONE_MARKER;
     }
 
     /// @notice True if the proposal has been executed.
     function isDone(bytes32 id_) public view returns (bool) {
-        return executableAt[id_] == _DONE_MARKER;
+        return executableAt[id_] == DONE_MARKER;
     }
 
     /// @notice True if the proposal is matured (executableAt passed) AND still within grace period.
     function isReady(bytes32 id_) public view returns (bool) {
-        uint256 at = executableAt[id_];
-        return at > _DONE_MARKER && at <= block.timestamp && block.timestamp <= at + gracePeriod;
+        uint256 _at = executableAt[id_];
+        return _at > DONE_MARKER && _at <= block.timestamp && block.timestamp <= _at + gracePeriod;
     }
 
-    /// @notice True if `account` is a proposer.
+    /// @notice True if `account_` is a proposer.
     function isProposer(address account_) external view returns (bool) {
-        return _proposers.contains(account_);
+        return proposers.contains(account_);
     }
 
-    /// @notice True if `account` is a canceller.
+    /// @notice True if `account_` is a canceller.
     function isCanceller(address account_) external view returns (bool) {
-        return _cancellers.contains(account_);
+        return cancellers.contains(account_);
     }
 
     /// @notice Number of active proposers.
     function proposerCount() external view returns (uint256) {
-        return _proposers.length();
+        return proposers.length();
     }
 
     /// @notice Number of active cancellers.
     function cancellerCount() external view returns (uint256) {
-        return _cancellers.length();
+        return cancellers.length();
     }
 
     /// @notice All current proposer addresses.
     function getProposers() external view returns (address[] memory) {
-        return _proposers.values();
+        return proposers.values();
     }
 
     /// @notice All current canceller addresses.
     function getCancellers() external view returns (address[] memory) {
-        return _cancellers.values();
+        return cancellers.values();
     }
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
@@ -271,20 +271,20 @@ contract TieredTimelock is ReentrancyGuard {
         bytes calldata data_,
         bytes32 predecessor_,
         bytes32 salt_
-    ) external onlyProposer returns (bytes32 id) {
+    ) external onlyProposer returns (bytes32 _id) {
         if (target_ == address(0)) revert ZeroAddress();
         if (data_.length < 4) revert ZeroSelector();
 
-        bytes4 sel = bytes4(data_[:4]);
-        uint256 delay = _resolveDelay(target_, sel, data_);
+        bytes4 _sel = bytes4(data_[:4]);
+        uint256 _delay = _resolveDelay(target_, _sel, data_);
 
-        id = hashProposal(target_, data_, predecessor_, salt_);
-        if (executableAt[id] != 0) revert AlreadyScheduled();
+        _id = hashProposal(target_, data_, predecessor_, salt_);
+        if (executableAt[_id] != 0) revert AlreadyScheduled();
 
-        uint256 at = block.timestamp + delay;
-        executableAt[id] = at;
+        uint256 _at = block.timestamp + _delay;
+        executableAt[_id] = _at;
 
-        emit Scheduled(id, target_, data_, predecessor_, salt_, at);
+        emit Scheduled(_id, target_, data_, predecessor_, salt_, _at);
     }
 
     /**
@@ -303,34 +303,34 @@ contract TieredTimelock is ReentrancyGuard {
         if (target_ == address(0)) revert ZeroAddress();
         if (data_.length < 4) revert ZeroSelector();
 
-        bytes32 id = hashProposal(target_, data_, predecessor_, salt_);
-        uint256 at = executableAt[id];
+        bytes32 _id = hashProposal(target_, data_, predecessor_, salt_);
+        uint256 _at = executableAt[_id];
 
-        if (at == 0) {
+        if (_at == 0) {
             // Not scheduled: only allowed if delay is 0 AND caller is a proposer.
-            bytes4 sel = bytes4(data_[:4]);
-            uint256 delay = _resolveDelay(target_, sel, data_);
-            if (delay != 0) revert MustSchedule();
-            if (!_proposers.contains(msg.sender)) revert NotProposer();
-        } else if (at == _DONE_MARKER) {
+            bytes4 _sel = bytes4(data_[:4]);
+            uint256 _delay = _resolveDelay(target_, _sel, data_);
+            if (_delay != 0) revert MustSchedule();
+            if (!proposers.contains(msg.sender)) revert NotProposer();
+        } else if (_at == DONE_MARKER) {
             revert AlreadyScheduled();
         } else {
-            if (block.timestamp < at) revert TimelockNotExpired();
-            if (block.timestamp > at + gracePeriod) revert ProposalExpired();
+            if (block.timestamp < _at) revert TimelockNotExpired();
+            if (block.timestamp > _at + gracePeriod) revert ProposalExpired();
         }
 
-        if (predecessor_ != bytes32(0) && executableAt[predecessor_] != _DONE_MARKER) {
+        if (predecessor_ != bytes32(0) && executableAt[predecessor_] != DONE_MARKER) {
             revert PredecessorNotDone();
         }
 
         // Mark done BEFORE the external call (CEI).
-        executableAt[id] = _DONE_MARKER;
+        executableAt[_id] = DONE_MARKER;
 
-        (bool ok, bytes memory ret) = target_.call{value: msg.value}(data_);
-        if (!ok) revert CallFailed(ret);
+        (bool _ok, bytes memory _ret) = target_.call{value: msg.value}(data_);
+        if (!_ok) revert CallFailed(_ret);
 
-        emit Executed(id, target_, data_);
-        return ret;
+        emit Executed(_id, target_, data_);
+        return _ret;
     }
 
     /**
@@ -338,8 +338,8 @@ contract TieredTimelock is ReentrancyGuard {
      *         Cannot cancel done or never-scheduled proposals.
      */
     function cancel(bytes32 id_) external onlyCanceller {
-        uint256 at = executableAt[id_];
-        if (at == 0 || at == _DONE_MARKER) revert NotScheduled();
+        uint256 _at = executableAt[id_];
+        if (_at == 0 || _at == DONE_MARKER) revert NotScheduled();
         delete executableAt[id_];
         emit Cancelled(id_, msg.sender);
     }
@@ -354,11 +354,11 @@ contract TieredTimelock is ReentrancyGuard {
      */
     function increaseDelay(address target_, bytes4 selector_, uint256 newDelay_) external onlySelf {
         if (newDelay_ > MAX_DELAY) revert DelayTooLong();
-        bytes32 key = delayKey(target_, selector_);
-        uint256 old = delayOf[key];
-        if (newDelay_ <= old) revert DelayNotIncreasing();
-        delayOf[key] = newDelay_;
-        emit DelaySet(target_, selector_, old, newDelay_);
+        bytes32 _key = delayKey(target_, selector_);
+        uint256 _old = delayOf[_key];
+        if (newDelay_ <= _old) revert DelayNotIncreasing();
+        delayOf[_key] = newDelay_;
+        emit DelaySet(target_, selector_, _old, newDelay_);
     }
 
     /**
@@ -366,38 +366,38 @@ contract TieredTimelock is ReentrancyGuard {
      *         delay, so a delay can never be reduced faster than it currently holds.
      */
     function decreaseDelay(address target_, bytes4 selector_, uint256 newDelay_) external onlySelf {
-        bytes32 key = delayKey(target_, selector_);
-        uint256 old = delayOf[key];
-        if (newDelay_ >= old) revert DelayNotDecreasing();
-        delayOf[key] = newDelay_;
-        emit DelaySet(target_, selector_, old, newDelay_);
+        bytes32 _key = delayKey(target_, selector_);
+        uint256 _old = delayOf[_key];
+        if (newDelay_ >= _old) revert DelayNotDecreasing();
+        delayOf[_key] = newDelay_;
+        emit DelaySet(target_, selector_, _old, newDelay_);
     }
 
     /// @notice Add a proposer. Self-governed. Reverts if already a member.
     function addProposer(address account_) external onlySelf {
         if (account_ == address(0)) revert ZeroAddress();
-        if (!_proposers.add(account_)) revert AlreadyRoleMember();
+        if (!proposers.add(account_)) revert AlreadyRoleMember();
         emit ProposerSet(account_, true);
     }
 
     /// @notice Remove a proposer. Reverts if this would leave zero proposers (would brick timelock).
     function removeProposer(address account_) external onlySelf {
-        if (_proposers.length() <= 1) revert CannotRemoveLastProposer();
-        if (!_proposers.remove(account_)) revert NotRoleMember();
+        if (proposers.length() <= 1) revert CannotRemoveLastProposer();
+        if (!proposers.remove(account_)) revert NotRoleMember();
         emit ProposerSet(account_, false);
     }
 
     /// @notice Add a canceller. Self-governed. Reverts if already a member.
     function addCanceller(address account_) external onlySelf {
         if (account_ == address(0)) revert ZeroAddress();
-        if (!_cancellers.add(account_)) revert AlreadyRoleMember();
+        if (!cancellers.add(account_)) revert AlreadyRoleMember();
         emit CancellerSet(account_, true);
     }
 
     /// @notice Remove a canceller. Reverts if this would leave zero cancellers (defense removed).
     function removeCanceller(address account_) external onlySelf {
-        if (_cancellers.length() <= 1) revert CannotRemoveLastCanceller();
-        if (!_cancellers.remove(account_)) revert NotRoleMember();
+        if (cancellers.length() <= 1) revert CannotRemoveLastCanceller();
+        if (!cancellers.remove(account_)) revert NotRoleMember();
         emit CancellerSet(account_, false);
     }
 
@@ -406,9 +406,9 @@ contract TieredTimelock is ReentrancyGuard {
         if (newGracePeriod_ < MIN_GRACE_PERIOD || newGracePeriod_ > MAX_GRACE_PERIOD) {
             revert GracePeriodOutOfBounds();
         }
-        uint256 old = gracePeriod;
+        uint256 _old = gracePeriod;
         gracePeriod = newGracePeriod_;
-        emit GracePeriodSet(old, newGracePeriod_);
+        emit GracePeriodSet(_old, newGracePeriod_);
     }
 
     /* ════════════════════════════════════════════════════════════════════════════════════════
@@ -425,9 +425,9 @@ contract TieredTimelock is ReentrancyGuard {
     function seedDelay(address target_, bytes4 selector_, uint256 delay_) external onlyAdmin {
         if (target_ == address(0)) revert ZeroAddress();
         if (delay_ > MAX_DELAY) revert DelayTooLong();
-        bytes32 key = delayKey(target_, selector_);
-        if (delayOf[key] != 0) revert AlreadySeeded(target_, selector_);
-        delayOf[key] = delay_;
+        bytes32 _key = delayKey(target_, selector_);
+        if (delayOf[_key] != 0) revert AlreadySeeded(target_, selector_);
+        delayOf[_key] = delay_;
         emit DelaySet(target_, selector_, 0, delay_);
     }
 
@@ -476,9 +476,9 @@ contract TieredTimelock is ReentrancyGuard {
             // decreaseDelay(address, bytes4, uint256)
             // data layout: [4-byte selector][32-byte target][32-byte selector word][32-byte newDelay]
             if (data_.length < 4 + 32 + 32 + 32) revert ZeroSelector();
-            address targetArg = address(uint160(uint256(bytes32(data_[4:36]))));
-            bytes4 selArg = bytes4(data_[36:40]);
-            return delayOf[delayKey(targetArg, selArg)];
+            address _targetArg = address(uint160(uint256(bytes32(data_[4:36]))));
+            bytes4 _selArg = bytes4(data_[36:40]);
+            return delayOf[delayKey(_targetArg, _selArg)];
         }
         return delayOf[delayKey(target_, sel_)];
     }
