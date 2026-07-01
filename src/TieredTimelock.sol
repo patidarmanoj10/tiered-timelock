@@ -29,8 +29,13 @@ import {EnumerableSet} from "@openzeppelin/contracts/utils/structs/EnumerableSet
  *   - After seeding, admin MUST call renounceAdmin() to make the contract fully self-governing.
  *     `renounceAdmin` refuses to renounce until critical role-change delays have been seeded.
  *
+ * ETH-input proposals:
+ *   Proposals can carry ETH via the `value` parameter. The value is part of the proposal hash,
+ *   so the amount forwarded to the target is fixed at schedule time. At execute time, msg.value
+ *   must equal the scheduled value (`ValueMismatch` otherwise). Whoever executes supplies the ETH.
+ *
  * Encoding for proposal IDs:
- *   id = keccak256(abi.encode(target, data, predecessor, salt))
+ *   id = keccak256(abi.encode(target, value, data, predecessor, salt))
  *   executableAt[id]:
  *     0   = never scheduled (or cancelled)
  *     1   = executed (DONE_MARKER)
@@ -86,12 +91,13 @@ contract TieredTimelock is ReentrancyGuard {
     event Scheduled(
         bytes32 indexed id,
         address indexed target,
+        uint256 value,
         bytes data,
         bytes32 predecessor,
         bytes32 salt,
         uint256 executableAt
     );
-    event Executed(bytes32 indexed id, address indexed target, bytes data);
+    event Executed(bytes32 indexed id, address indexed target, uint256 value, bytes data);
     event Cancelled(bytes32 indexed id, address indexed canceller);
     event DelaySet(address indexed target, bytes4 indexed selector, uint256 oldDelay, uint256 newDelay);
     event ProposerSet(address indexed proposer, bool allowed);
@@ -120,6 +126,7 @@ contract TieredTimelock is ReentrancyGuard {
     error ProposalExpired();
     error MustSchedule();
     error CallFailed(bytes returnData);
+    error ValueMismatch(uint256 expected, uint256 actual);
     error CannotRemoveLastProposer();
     error CannotRemoveLastCanceller();
     error AlreadyRoleMember();
@@ -199,11 +206,12 @@ contract TieredTimelock is ReentrancyGuard {
     /// @notice Compute the proposal id used internally as the key in `executableAt`.
     function hashProposal(
         address target_,
+        uint256 value_,
         bytes calldata data_,
         bytes32 predecessor_,
         bytes32 salt_
     ) public pure returns (bytes32) {
-        return keccak256(abi.encode(target_, data_, predecessor_, salt_));
+        return keccak256(abi.encode(target_, value_, data_, predecessor_, salt_));
     }
 
     /// @notice Compute the (target, selector) storage key for `delayOf`.
@@ -265,9 +273,13 @@ contract TieredTimelock is ReentrancyGuard {
      * @notice Schedule a proposal. Proposer-only. `executableAt` is computed from `delayOf`.
      *         For proposals targeting this contract's own `decreaseDelay`, `executableAt` uses the
      *         TARGET selector's current delay so a delay reduction cannot be fast-pathed.
+     *
+     *         `value_` is the exact ETH amount the target will receive at execute time. It is part
+     *         of the proposal hash, so it cannot be changed after scheduling.
      */
     function schedule(
         address target_,
+        uint256 value_,
         bytes calldata data_,
         bytes32 predecessor_,
         bytes32 salt_
@@ -278,13 +290,13 @@ contract TieredTimelock is ReentrancyGuard {
         bytes4 _sel = bytes4(data_[:4]);
         uint256 _delay = _resolveDelay(target_, _sel, data_);
 
-        _id = hashProposal(target_, data_, predecessor_, salt_);
+        _id = hashProposal(target_, value_, data_, predecessor_, salt_);
         if (executableAt[_id] != 0) revert AlreadyScheduled();
 
         uint256 _at = block.timestamp + _delay;
         executableAt[_id] = _at;
 
-        emit Scheduled(_id, target_, data_, predecessor_, salt_, _at);
+        emit Scheduled(_id, target_, value_, data_, predecessor_, salt_, _at);
     }
 
     /**
@@ -292,18 +304,24 @@ contract TieredTimelock is ReentrancyGuard {
      *         When `delayOf[target, selector] == 0` and no schedule exists, the proposer may
      *         execute in a single tx without scheduling first.
      *
+     *         `value_` must match the value used at schedule time (or 0 for the delay-0 shortcut).
+     *         msg.value must equal `value_`; the caller supplies the ETH that gets forwarded to
+     *         the target.
+     *
      *         If `predecessor_ != 0`, that proposal must be `done` before this one can execute.
      */
     function execute(
         address target_,
+        uint256 value_,
         bytes calldata data_,
         bytes32 predecessor_,
         bytes32 salt_
     ) external payable nonReentrant returns (bytes memory) {
         if (target_ == address(0)) revert ZeroAddress();
         if (data_.length < 4) revert ZeroSelector();
+        if (msg.value != value_) revert ValueMismatch(value_, msg.value);
 
-        bytes32 _id = hashProposal(target_, data_, predecessor_, salt_);
+        bytes32 _id = hashProposal(target_, value_, data_, predecessor_, salt_);
         uint256 _at = executableAt[_id];
 
         if (_at == 0) {
@@ -326,10 +344,10 @@ contract TieredTimelock is ReentrancyGuard {
         // Mark done BEFORE the external call (CEI).
         executableAt[_id] = DONE_MARKER;
 
-        (bool _ok, bytes memory _ret) = target_.call{value: msg.value}(data_);
+        (bool _ok, bytes memory _ret) = target_.call{value: value_}(data_);
         if (!_ok) revert CallFailed(_ret);
 
-        emit Executed(_id, target_, data_);
+        emit Executed(_id, target_, value_, data_);
         return _ret;
     }
 

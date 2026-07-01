@@ -52,4 +52,10 @@ contract TargetMock {
     function payableSink() external payable onlyOwner {
         value = msg.value;
     }
+
+    /// @dev Mimics WETH.deposit() / vaETH.depositETH() — requires msg.value > 0.
+    function depositETH() external payable onlyOwner {
+        require(msg.value > 0, "no value");
+        value = msg.value;
+    }
 }

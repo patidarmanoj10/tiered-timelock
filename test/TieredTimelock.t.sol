@@ -56,6 +56,7 @@ contract TieredTimelockTest is Test {
         vm.prank(proposer);
         tl.execute(
             address(tl),
+             0,
             abi.encodeCall(TieredTimelock.addProposer, (_newProp)),
             bytes32(0),
             bytes32(0)
@@ -183,7 +184,7 @@ contract TieredTimelockTest is Test {
         // Default delay is 0 → proposer can execute without scheduling.
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (42));
         vm.prank(proposer);
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
         assertEq(target.value(), 42);
     }
 
@@ -191,7 +192,7 @@ contract TieredTimelockTest is Test {
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (42));
         vm.prank(stranger);
         vm.expectRevert(TieredTimelock.NotProposer.selector);
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_scheduleAndExecute_afterDelay() public {
@@ -200,21 +201,21 @@ contract TieredTimelockTest is Test {
 
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (99));
         vm.prank(proposer);
-        bytes32 _id = tl.schedule(address(target), _data, bytes32(0), bytes32(0));
+        bytes32 _id = tl.schedule(address(target), 0, _data, bytes32(0), bytes32(0));
 
         assertTrue(tl.isPending(_id));
         assertFalse(tl.isReady(_id));
 
         // Before executableAt — execute reverts.
         vm.expectRevert(TieredTimelock.TimelockNotExpired.selector);
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
 
         vm.warp(block.timestamp + 1 days);
         assertTrue(tl.isReady(_id));
 
         // After executableAt, ANYONE can execute (permissionless).
         vm.prank(stranger);
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
         assertEq(target.value(), 99);
         assertTrue(tl.isDone(_id));
     }
@@ -225,9 +226,9 @@ contract TieredTimelockTest is Test {
 
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (1));
         vm.startPrank(proposer);
-        tl.schedule(address(target), _data, bytes32(0), bytes32(0));
+        tl.schedule(address(target), 0, _data, bytes32(0), bytes32(0));
         vm.expectRevert(TieredTimelock.AlreadyScheduled.selector);
-        tl.schedule(address(target), _data, bytes32(0), bytes32(0));
+        tl.schedule(address(target), 0, _data, bytes32(0), bytes32(0));
         vm.stopPrank();
     }
 
@@ -237,8 +238,8 @@ contract TieredTimelockTest is Test {
 
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (1));
         vm.startPrank(proposer);
-        bytes32 _id1 = tl.schedule(address(target), _data, bytes32(0), bytes32(uint256(1)));
-        bytes32 _id2 = tl.schedule(address(target), _data, bytes32(0), bytes32(uint256(2)));
+        bytes32 _id1 = tl.schedule(address(target), 0, _data, bytes32(0), bytes32(uint256(1)));
+        bytes32 _id2 = tl.schedule(address(target), 0, _data, bytes32(0), bytes32(uint256(2)));
         vm.stopPrank();
 
         assertTrue(_id1 != _id2);
@@ -252,18 +253,18 @@ contract TieredTimelockTest is Test {
 
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (7));
         vm.prank(proposer);
-        tl.schedule(address(target), _data, bytes32(0), bytes32(0));
+        tl.schedule(address(target), 0, _data, bytes32(0), bytes32(0));
 
         vm.warp(block.timestamp + 1 days + INITIAL_GRACE + 1);
         vm.expectRevert(TieredTimelock.ProposalExpired.selector);
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_execute_bubblesUpRevertReason() public {
         bytes memory _data = abi.encodeCall(TargetMock.revertingFunction, ());
         vm.prank(proposer);
         vm.expectRevert(); // CallFailed wraps the inner revert data
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
     }
 
     /* ════════════════════════════════════════════════════════════════════════
@@ -276,7 +277,7 @@ contract TieredTimelockTest is Test {
 
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (1));
         vm.prank(proposer);
-        bytes32 _id = tl.schedule(address(target), _data, bytes32(0), bytes32(0));
+        bytes32 _id = tl.schedule(address(target), 0, _data, bytes32(0), bytes32(0));
 
         vm.prank(canceller);
         tl.cancel(_id);
@@ -286,7 +287,7 @@ contract TieredTimelockTest is Test {
         vm.warp(block.timestamp + 1 days);
         vm.prank(proposer);
         vm.expectRevert(TieredTimelock.MustSchedule.selector);
-        tl.execute(address(target), _data, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_cancel_revertsForNonCanceller() public {
@@ -295,7 +296,7 @@ contract TieredTimelockTest is Test {
 
         bytes memory _data = abi.encodeCall(TargetMock.setValue, (1));
         vm.prank(proposer);
-        bytes32 _id = tl.schedule(address(target), _data, bytes32(0), bytes32(0));
+        bytes32 _id = tl.schedule(address(target), 0, _data, bytes32(0), bytes32(0));
 
         vm.prank(stranger);
         vm.expectRevert(TieredTimelock.NotCanceller.selector);
@@ -322,19 +323,19 @@ contract TieredTimelockTest is Test {
         bytes memory _dataB = abi.encodeCall(TargetMock.setSecondValue, (20));
 
         vm.startPrank(proposer);
-        bytes32 _idA = tl.schedule(address(target), _dataA, bytes32(0), bytes32(0));
-        tl.schedule(address(target), _dataB, _idA, bytes32(0));
+        bytes32 _idA = tl.schedule(address(target), 0, _dataA, bytes32(0), bytes32(0));
+        tl.schedule(address(target), 0, _dataB, _idA, bytes32(0));
         vm.stopPrank();
 
         vm.warp(block.timestamp + 1 days);
 
         // B reverts because A isn't done.
         vm.expectRevert(TieredTimelock.PredecessorNotDone.selector);
-        tl.execute(address(target), _dataB, _idA, bytes32(0));
+        tl.execute(address(target), 0, _dataB, _idA, bytes32(0));
 
         // Execute A, then B succeeds.
-        tl.execute(address(target), _dataA, bytes32(0), bytes32(0));
-        tl.execute(address(target), _dataB, _idA, bytes32(0));
+        tl.execute(address(target), 0, _dataA, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _dataB, _idA, bytes32(0));
 
         assertEq(target.value(), 10);
         assertEq(target.secondValue(), 20);
@@ -351,7 +352,7 @@ contract TieredTimelockTest is Test {
             (address(target), TargetMock.setValue.selector, 3 days)
         );
         vm.prank(proposer);
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
 
         assertEq(
             tl.delayOf(tl.delayKey(address(target), TargetMock.setValue.selector)),
@@ -374,7 +375,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.DelayNotIncreasing.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_increaseDelay_revertsAboveMax() public {
@@ -389,7 +390,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.DelayTooLong.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_decreaseDelay_usesTargetCurrentDelay() public {
@@ -403,16 +404,16 @@ contract TieredTimelockTest is Test {
             (address(target), TargetMock.setValue.selector, 1 hours)
         );
         vm.prank(proposer);
-        bytes32 _id = tl.schedule(address(tl), _data, bytes32(0), bytes32(0));
+        bytes32 _id = tl.schedule(address(tl), 0, _data, bytes32(0), bytes32(0));
 
         // Before 5 days passes, execute reverts.
         vm.warp(block.timestamp + 5 days - 1);
         vm.expectRevert(TieredTimelock.TimelockNotExpired.selector);
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
 
         // After 5 days, execute succeeds.
         vm.warp(block.timestamp + 2);
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
         assertEq(
             tl.delayOf(tl.delayKey(address(target), TargetMock.setValue.selector)),
             1 hours
@@ -428,7 +429,7 @@ contract TieredTimelockTest is Test {
             (address(target), TargetMock.setValue.selector, 5 days)
         );
         vm.prank(proposer);
-        tl.schedule(address(tl), _data, bytes32(0), bytes32(0));
+        tl.schedule(address(tl), 0, _data, bytes32(0), bytes32(0));
         vm.warp(block.timestamp + 5 days);
         vm.expectRevert(
             abi.encodeWithSelector(
@@ -436,7 +437,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.DelayNotDecreasing.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     /* ════════════════════════════════════════════════════════════════════════
@@ -447,7 +448,7 @@ contract TieredTimelockTest is Test {
         address _newProp = makeAddr("newProp");
         bytes memory _data = abi.encodeCall(TieredTimelock.addProposer, (_newProp));
         vm.prank(proposer);
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
 
         assertTrue(tl.isProposer(_newProp));
         assertEq(tl.proposerCount(), 2);
@@ -462,7 +463,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.AlreadyRoleMember.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_removeProposer_revertsWhenLast() public {
@@ -474,7 +475,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.CannotRemoveLastProposer.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     function test_removeProposer_succeedsWithMultiple() public {
@@ -483,6 +484,7 @@ contract TieredTimelockTest is Test {
         vm.prank(proposer);
         tl.execute(
             address(tl),
+             0,
             abi.encodeCall(TieredTimelock.addProposer, (_newProp)),
             bytes32(0),
             bytes32(0)
@@ -491,6 +493,7 @@ contract TieredTimelockTest is Test {
         vm.prank(proposer);
         tl.execute(
             address(tl),
+             0,
             abi.encodeCall(TieredTimelock.removeProposer, (proposer)),
             bytes32(0),
             bytes32(0)
@@ -510,7 +513,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.CannotRemoveLastCanceller.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     /* ════════════════════════════════════════════════════════════════════════
@@ -520,7 +523,7 @@ contract TieredTimelockTest is Test {
     function test_updateGracePeriod_viaSelfCall() public {
         bytes memory _data = abi.encodeCall(TieredTimelock.updateGracePeriod, (7 days));
         vm.prank(proposer);
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
         assertEq(tl.gracePeriod(), 7 days);
     }
 
@@ -533,7 +536,7 @@ contract TieredTimelockTest is Test {
                 abi.encodeWithSelector(TieredTimelock.GracePeriodOutOfBounds.selector)
             )
         );
-        tl.execute(address(tl), _data, bytes32(0), bytes32(0));
+        tl.execute(address(tl), 0, _data, bytes32(0), bytes32(0));
     }
 
     /* ════════════════════════════════════════════════════════════════════════
@@ -549,6 +552,74 @@ contract TieredTimelockTest is Test {
 
         vm.expectRevert(TieredTimelock.NotSelf.selector);
         tl.updateGracePeriod(2 days);
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+                                  ETH-VALUE PROPOSALS
+    ════════════════════════════════════════════════════════════════════════ */
+
+    /// @notice delay-0 shortcut: proposer attaches ETH inside the single-tx execute.
+    function test_ethShortcut_delayZero_forwardsValue() public {
+        bytes memory _data = abi.encodeCall(TargetMock.depositETH, ());
+        vm.deal(proposer, 5 ether);
+        vm.prank(proposer);
+        tl.execute{value: 3 ether}(address(target), 3 ether, _data, bytes32(0), bytes32(0));
+        assertEq(target.value(), 3 ether);
+        assertEq(address(target).balance, 3 ether);
+    }
+
+    /// @notice Scheduled ETH proposal: value is fixed at schedule; permissionless execute must
+    ///         supply matching ETH.
+    function test_ethScheduled_executeMustSupplyExactValue() public {
+        vm.prank(admin);
+        tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
+
+        bytes memory _data = abi.encodeCall(TargetMock.depositETH, ());
+        vm.prank(proposer);
+        bytes32 _id = tl.schedule(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+        assertTrue(tl.isPending(_id));
+
+        vm.warp(block.timestamp + 1 days);
+
+        // Executor attaches wrong amount → revert.
+        vm.deal(stranger, 5 ether);
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(TieredTimelock.ValueMismatch.selector, 2 ether, 1 ether)
+        );
+        tl.execute{value: 1 ether}(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+
+        // Executor attaches 0 → revert.
+        vm.prank(stranger);
+        vm.expectRevert(
+            abi.encodeWithSelector(TieredTimelock.ValueMismatch.selector, 2 ether, 0)
+        );
+        tl.execute(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+
+        // Executor attaches exact amount → succeeds.
+        vm.prank(stranger);
+        tl.execute{value: 2 ether}(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+        assertEq(target.value(), 2 ether);
+        assertEq(address(target).balance, 2 ether);
+    }
+
+    /// @notice Scheduled ETH proposal cannot be re-executed with a different value (different id).
+    function test_ethScheduled_wrongValueIdDoesNotMatchSchedule() public {
+        vm.prank(admin);
+        tl.seedDelay(address(target), TargetMock.depositETH.selector, 1 days);
+
+        bytes memory _data = abi.encodeCall(TargetMock.depositETH, ());
+        vm.prank(proposer);
+        tl.schedule(address(target), 2 ether, _data, bytes32(0), bytes32(0));
+
+        vm.warp(block.timestamp + 1 days);
+
+        // Try executing at value=1 ether — no matching schedule exists at that value AND
+        // depositETH has a non-zero delay, so single-tx shortcut also fails.
+        vm.deal(proposer, 5 ether);
+        vm.prank(proposer);
+        vm.expectRevert(TieredTimelock.MustSchedule.selector);
+        tl.execute{value: 1 ether}(address(target), 1 ether, _data, bytes32(0), bytes32(0));
     }
 
     /* ════════════════════════════════════════════════════════════════════════
@@ -576,7 +647,7 @@ contract TieredTimelockTest is Test {
 
         vm.prank(proposer);
         vm.expectRevert(); // CallFailed(bytes) — the inner ReentrancyGuard revert string
-        tl.execute(address(target), _outerData, bytes32(0), bytes32(0));
+        tl.execute(address(target), 0, _outerData, bytes32(0), bytes32(0));
     }
 
     /* ════════════════════════════════════════════════════════════════════════
