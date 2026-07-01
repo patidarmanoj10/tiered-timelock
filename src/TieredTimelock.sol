@@ -12,7 +12,7 @@ import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155
  *         single owner/governor of every contract in a protocol stack.
  *
  * Operating model:
- *   - PROPOSER schedules a call: schedule(target, data, predecessor, salt)
+ *   - PROPOSER schedules a call: schedule(target, value, data, predecessor, salt)
  *     → executableAt = now + delayOf[target, selector]
  *   - After executableAt and within grace period: anyone can execute the proposal
  *   - CANCELLER can cancel a pending proposal before it executes
